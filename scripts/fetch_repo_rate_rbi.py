@@ -15,9 +15,8 @@ FILE_PATH = "data/repo_rate.xlsx"
 
 def load_repo_rate():
 
-    # header row is the 6th Excel row ("Effective Date", "Repo")
-    # so we use header=5 (0-indexed)
-    df = pd.read_excel(FILE_PATH, header=5)
+    # header row 1: "Effective Date", "Repo"; data rows 2+
+    df = pd.read_excel(FILE_PATH)
 
     # keep only first two columns
     df = df.iloc[:, :2]
