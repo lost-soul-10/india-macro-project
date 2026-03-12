@@ -10,11 +10,11 @@ SUPABASE_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Fetch WPI data from raw table
+# Fetch GDP quarterly growth data
 result = (
     supabase.table("raw_macro_series")
     .select("series_name, period_date, value")
-    .eq("series_name", "WPI")
+    .eq("series_name", "GDP_GROWTH_REAL_QUARTERLY")
     .order("period_date")
     .execute()
 )
@@ -22,39 +22,40 @@ result = (
 df = pd.DataFrame(result.data)
 
 if df.empty:
-    print("No WPI data found in raw_macro_series")
+    print("No GDP data found in raw_macro_series")
     raise SystemExit
 
 df["period_date"] = pd.to_datetime(df["period_date"])
 df["value"] = pd.to_numeric(df["value"])
 
-# Sort just in case
 df = df.sort_values("period_date").reset_index(drop=True)
 
-# Build features
-df["wpi_mom_change"] = df["value"].pct_change() * 100
-df["wpi_yoy_change"] = df["value"].pct_change(12) * 100
-df["wpi_3m_avg"] = df["value"].rolling(3).mean()
+# Build GDP features
+df["gdp_growth_real"] = df["value"]
+df["gdp_growth_4q_avg"] = df["value"].rolling(4).mean()
+df["gdp_growth_acceleration"] = df["value"].diff()
 
 rows = []
 
 for _, r in df.iterrows():
+
     as_of_date = r["period_date"].date()
 
     feature_map = {
-        "wpi_index": round(r["value"], 4) if pd.notnull(r["value"]) else None,
-        "wpi_mom_change": round(r["wpi_mom_change"], 4) if pd.notnull(r["wpi_mom_change"]) else None,
-        "wpi_yoy_change": round(r["wpi_yoy_change"], 4) if pd.notnull(r["wpi_yoy_change"]) else None,
-        "wpi_3m_avg": round(r["wpi_3m_avg"], 4) if pd.notnull(r["wpi_3m_avg"]) else None,
+        "gdp_growth_real": r["gdp_growth_real"],
+        "gdp_growth_4q_avg": r["gdp_growth_4q_avg"],
+        "gdp_growth_acceleration": r["gdp_growth_acceleration"],
     }
 
     for feature_name, feature_value in feature_map.items():
+
         if pd.notnull(feature_value):
+
             rows.append({
                 "as_of_date": str(as_of_date),
                 "feature_name": feature_name,
-                "feature_value": float(feature_value),
-                "feature_group": "inflation"
+                "feature_value": round(float(feature_value), 4),
+                "feature_group": "growth"
             })
 
 result = supabase.table("macro_features").upsert(

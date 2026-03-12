@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_SECRET_KEY")
 MOSPI_EMAIL = os.getenv("MOSPI_EMAIL")
 MOSPI_PASSWORD = os.getenv("MOSPI_PASSWORD")
 
