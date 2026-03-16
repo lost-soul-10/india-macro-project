@@ -25,7 +25,7 @@ jobs:
       - name: Run WPI fetch
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
           MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
         run: python scripts/fetch_wpi_mospi.py
@@ -33,7 +33,7 @@ jobs:
       - name: Build WPI features
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
           MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
         run: python scripts/build_wpi_features.py
