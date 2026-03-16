@@ -9,17 +9,17 @@ from supabase import create_client
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SECRET_KEY")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 MOSPI_EMAIL = os.getenv("MOSPI_EMAIL")
 MOSPI_PASSWORD = os.getenv("MOSPI_PASSWORD")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY in .env")
+if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+    raise ValueError("Missing SUPABASE_URL or SUPABASE_SECRET_KEY in .env")
 
 if not MOSPI_EMAIL or not MOSPI_PASSWORD:
     raise ValueError("Missing MOSPI_EMAIL or MOSPI_PASSWORD in .env")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
 GDP_URL = "https://api.mospi.gov.in/api/nas/getNASData"
