@@ -8,14 +8,14 @@ from dateutil.relativedelta import relativedelta
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SECRET_KEY")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 MOSPI_EMAIL = os.getenv("MOSPI_EMAIL")
 MOSPI_PASSWORD = os.getenv("MOSPI_PASSWORD")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, MOSPI_EMAIL, MOSPI_PASSWORD]):
+if not all([SUPABASE_URL, SUPABASE_SECRET_KEY, MOSPI_EMAIL, MOSPI_PASSWORD]):
     raise ValueError("Missing one or more environment variables in .env")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
 WPI_URL = "https://api.mospi.gov.in/api/wpi/getWpiRecords"
