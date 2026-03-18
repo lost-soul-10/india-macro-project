@@ -19,6 +19,9 @@ ENABLE_REGIME_METADATA = os.getenv("ENABLE_REGIME_METADATA", "0").strip() in {"1
 REGIME_VERSION = "v4_monthly_resampled_classification_aligned"
 EARLY_MIN_PERIODS = 6
 REGIME_THRESHOLD = float(os.getenv("REGIME_THRESHOLD", "0.35"))
+POLICY_IMPULSE_LAG_MONTHS = int(os.getenv("POLICY_IMPULSE_LAG_MONTHS", "6"))
+POLICY_IMPULSE_WEIGHT = float(os.getenv("POLICY_IMPULSE_WEIGHT", "0.6"))
+POLICY_STANCE_WEIGHT = float(os.getenv("POLICY_STANCE_WEIGHT", "0.4"))
 STAGFLATION_G_THRESHOLD = float(os.getenv("STAGFLATION_G_THRESHOLD", "0.6"))
 STAGFLATION_I_THRESHOLD = float(os.getenv("STAGFLATION_I_THRESHOLD", "0.6"))
 STAGFLATION_REQUIRE_HEATING = os.getenv("STAGFLATION_REQUIRE_HEATING", "1").strip() in {"1", "true", "True", "yes", "YES"}
@@ -192,13 +195,23 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     # ---------------------------
     # Policy block
     # ---------------------------
-    # Real policy rate is meaningful only against an inflation expectation proxy (YoY CPI here).
+    # Repo is a step function; for a monthly policy signal use "stance + impulse".
+    # - Stance: level of real policy rate (restrictive vs accommodative)
+    # - Impulse: change in real policy rate over POLICY_IMPULSE_LAG_MONTHS (tightening vs easing)
     if "repo_rate" in df.columns and "cpi_headline_index_yoy_change" in df.columns:
         df["real_policy_rate"] = df["repo_rate"] - df["cpi_headline_index_yoy_change"]
+
         df["real_policy_rate_z"] = robust_zscore_adaptive(df["real_policy_rate"])
 
-        # tighter policy = more negative score
-        df["policy_score"] = -df["real_policy_rate_z"]
+        df["real_policy_impulse"] = df["real_policy_rate"] - df["real_policy_rate"].shift(POLICY_IMPULSE_LAG_MONTHS)
+        df["real_policy_impulse_z"] = robust_zscore_adaptive(df["real_policy_impulse"])
+
+        # tighter conditions = more negative score
+        blended = (
+            POLICY_IMPULSE_WEIGHT * df["real_policy_impulse_z"]
+            + POLICY_STANCE_WEIGHT * df["real_policy_rate_z"]
+        )
+        df["policy_score"] = -blended
 
     # ---------------------------
     # External block
