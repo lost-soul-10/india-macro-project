@@ -126,6 +126,12 @@ def load_macro_features() -> pd.DataFrame:
     # Forward fill slower-moving / released-less-frequently data
     df = df.ffill(limit=FFILL_LIMIT)
 
+    # Policy rate is a step function: it remains in effect until changed.
+    # For regime calendars, it should carry forward without a short limit,
+    # otherwise it disappears (NaN) a few months after the last decision date.
+    if "repo_rate" in df.columns:
+        df["repo_rate"] = df["repo_rate"].ffill()
+
     print("Available columns:")
     print(df.columns.tolist())
     print("Monthly index preview:")
