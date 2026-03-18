@@ -53,7 +53,7 @@ for _, r in df.iterrows():
                 "as_of_date": str(as_of_date),
                 "feature_name": feature_name,
                 "feature_value": float(feature_value),
-                "feature_group": "industrial"
+                "feature_group": "growth"
             })
 
 result = supabase.table("macro_features").upsert(
