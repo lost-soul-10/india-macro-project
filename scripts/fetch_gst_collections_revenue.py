@@ -10,51 +10,35 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
-FILE_PATH = "data/gst_collection_revenue.xlsx"
+FILE_PATH = "data/gst_collection_revenues.xlsx"
 
 
 def load_gst_collections():
-    # read Excel file
     df = pd.read_excel(FILE_PATH)
 
-    # keep only first two columns
-    df = df.iloc[:, :2]
+    # keep only the columns you actually have
+    df = df[["period_date", "series_name", "value"]].copy()
 
-    # rename columns
-    df.columns = ["date", "value"]
+    # parse date
+    df["period_date"] = pd.to_datetime(df["period_date"], errors="coerce")
 
-    # parse dates
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    # remove bad date rows
-    df = df.dropna(subset=["date"])
-
-    # clean value column
-    df["value"] = (
-        df["value"]
-        .astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("₹", "", regex=False)
-        .str.strip()
-    )
-
-    # replace blanks / dash values
-    df["value"] = df["value"].replace(["-", "", "nan", "None"], pd.NA)
-
-    # convert to numeric
+    # numeric value
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
-    # drop rows where value is missing
-    df = df.dropna(subset=["value"])
+    # drop bad rows
+    df = df.dropna(subset=["period_date", "value"])
 
-    # keep only 2022–2026
-    df = df[(df["date"].dt.year >= 2022) & (df["date"].dt.year <= 2026)]
+    # optional year filter
+    df = df[
+        (df["period_date"].dt.year >= 2022) &
+        (df["period_date"].dt.year <= 2026)
+    ]
 
-    # sort
-    df = df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("period_date").reset_index(drop=True)
 
     print("Rows loaded:", len(df))
-    print(df)
+    print(df.head())
+    print(df.tail())
 
     return df
 
@@ -66,7 +50,7 @@ def build_rows(df):
         rows.append({
             "series_name": "GST_COLLECTIONS",
             "source": "manual_excel",
-            "period_date": str(r["date"].date()),
+            "period_date": str(r["period_date"].date()),
             "release_date": None,
             "value": float(r["value"]),
             "unit": "inr_crore",
