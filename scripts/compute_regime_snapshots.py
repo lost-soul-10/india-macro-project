@@ -16,9 +16,14 @@ SMOOTHING_WINDOW = 3
 INFLATION_MOMENTUM_WINDOW = 6
 EXTERNAL_SMOOTH_WINDOW = 3
 ENABLE_REGIME_METADATA = os.getenv("ENABLE_REGIME_METADATA", "0").strip() in {"1", "true", "True", "yes", "YES"}
-REGIME_VERSION = "v2_growth_inflation_level_momentum_overlay"
+REGIME_VERSION = "v4_monthly_resampled_classification_aligned"
 EARLY_MIN_PERIODS = 6
-REGIME_THRESHOLD = float(os.getenv("REGIME_THRESHOLD", "0.35"))  # z-score units; adds a neutral band
+REGIME_THRESHOLD = float(os.getenv("REGIME_THRESHOLD", "0.35"))
+STAGFLATION_G_THRESHOLD = float(os.getenv("STAGFLATION_G_THRESHOLD", "0.6"))
+STAGFLATION_I_THRESHOLD = float(os.getenv("STAGFLATION_I_THRESHOLD", "0.6"))
+STAGFLATION_REQUIRE_HEATING = os.getenv("STAGFLATION_REQUIRE_HEATING", "1").strip() in {"1", "true", "True", "yes", "YES"}
+STAGFLATION_CPI_MIN = float(os.getenv("STAGFLATION_CPI_MIN", "4.0"))
+OVERHEATING_CPI_MIN = float(os.getenv("OVERHEATING_CPI_MIN", "4.5"))
 
 
 def safe_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | None = None) -> pd.Series:
@@ -38,8 +43,6 @@ def robust_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | 
     Rolling robust z-score using median and MAD.
     Uses MAD scaling factor 1.4826 so it is comparable to std for normal data.
     """
-    # Using window//2 is often too strict for shorter histories (e.g., India features since 2022).
-    # This default still avoids very early noisy z-scores while allowing history to show up sooner.
     if min_periods is None:
         min_periods = max(EARLY_MIN_PERIODS, window // 3)
 
@@ -58,16 +61,13 @@ def robust_zscore_adaptive(series: pd.Series, window: int = Z_WINDOW) -> pd.Seri
     """
     s = series.astype("float64")
 
-    # Expanding baseline (early sample)
     exp_med = s.expanding(min_periods=EARLY_MIN_PERIODS).median()
     exp_mad = (s - exp_med).abs().expanding(min_periods=EARLY_MIN_PERIODS).median()
     exp_denom = (1.4826 * exp_mad).mask(exp_mad == 0)
     exp_z = (s - exp_med) / exp_denom
 
-    # Rolling baseline (once enough history exists)
     roll_z = robust_zscore(s, window=window)
 
-    # Use rolling when available, else expanding
     out = roll_z.where(roll_z.notna(), exp_z)
     return out.replace([float("inf"), float("-inf")], pd.NA)
 
@@ -107,16 +107,26 @@ def load_macro_features() -> pd.DataFrame:
     df = df.pivot_table(
         index="as_of_date",
         columns="feature_name",
-        values="feature_value"
+        values="feature_value",
+        aggfunc="last"
     )
 
     df = df.sort_index()
 
-    # forward fill slower-moving / released-less-frequently data
+    # -------------------------------------------------
+    # CRITICAL FIX 1:
+    # Force mixed-frequency feature rows onto a clean
+    # monthly month-start regime calendar.
+    # -------------------------------------------------
+    df = df.resample("MS").last()
+
+    # Forward fill slower-moving / released-less-frequently data
     df = df.ffill(limit=FFILL_LIMIT)
 
     print("Available columns:")
     print(df.columns.tolist())
+    print("Monthly index preview:")
+    print(df.index[-12:])
 
     return df
 
@@ -125,29 +135,29 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     # ---------------------------
     # Growth block
     # ---------------------------
-    # GDP anchor
     if "gdp_growth_real" in df.columns and "gdp_growth_4q_avg" in df.columns:
         df["gdp_signal"] = df["gdp_growth_real"] - df["gdp_growth_4q_avg"]
         df["gdp_z"] = robust_zscore_adaptive(df["gdp_signal"])
     elif "gdp_growth_real" in df.columns and "gdp_growth_4q_avg" not in df.columns:
-        # Fallback: compute a simple 4-period trailing mean if the precomputed avg isn't available.
         df["gdp_growth_4q_avg"] = df["gdp_growth_real"].rolling(window=4, min_periods=2).mean()
         df["gdp_signal"] = df["gdp_growth_real"] - df["gdp_growth_4q_avg"]
         df["gdp_z"] = robust_zscore_adaptive(df["gdp_signal"])
 
-    # IIP monthly pulse
     if "iip_yoy_change" in df.columns:
-        df["iip_z"] = robust_zscore_adaptive(df["iip_yoy_change"])
+        df["iip_smooth"] = df["iip_yoy_change"].rolling(window=3, min_periods=1).mean()
+        df["iip_z"] = robust_zscore_adaptive(df["iip_smooth"])
 
-    # GST monthly pulse
     if "gst_3m_yoy_avg" in df.columns:
         df["gst_z"] = robust_zscore_adaptive(df["gst_3m_yoy_avg"])
+    elif "gst_yoy_change" in df.columns:
+        df["gst_smooth"] = df["gst_yoy_change"].rolling(window=3, min_periods=1).mean()
+        df["gst_z"] = robust_zscore_adaptive(df["gst_smooth"])
 
     growth_inputs = []
     if "gdp_z" in df.columns:
-        growth_inputs.append(("gdp_z", 0.4))
+        growth_inputs.append(("gdp_z", 0.5))
     if "iip_z" in df.columns:
-        growth_inputs.append(("iip_z", 0.3))
+        growth_inputs.append(("iip_z", 0.2))
     if "gst_z" in df.columns:
         growth_inputs.append(("gst_z", 0.3))
 
@@ -158,36 +168,33 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     # Inflation block
     # ---------------------------
     if "cpi_headline_index_yoy_change" in df.columns or "cpi_headline_index_mom_change" in df.columns:
-        # Prefer YoY when available; fall back to MoM pulse early in history.
+        cpi_yoy = df["cpi_headline_index_yoy_change"] if "cpi_headline_index_yoy_change" in df.columns else None
         infl_level_series = (
-            df["cpi_headline_index_yoy_change"]
-            if "cpi_headline_index_yoy_change" in df.columns
-            else df["cpi_headline_index_mom_change"]
+            cpi_yoy if cpi_yoy is not None else df["cpi_headline_index_mom_change"]
         )
 
-        # Level: where inflation stands vs its own history
+        # Guardrails (STAGFLATION_CPI_MIN / OVERHEATING_CPI_MIN) are defined in YoY % terms,
+        # so only store YoY CPI here (leave NA if only MoM is available).
+        df["cpi_level_actual"] = cpi_yoy
+
         df["inflation_level_z"] = robust_zscore_adaptive(infl_level_series)
 
-        # Momentum: whether inflation is heating up or cooling down recently
-        # Using deviation from a rolling mean is more robust than MoM noise.
         infl = infl_level_series
-        infl_trend = infl.rolling(window=INFLATION_MOMENTUM_WINDOW, min_periods=max(3, INFLATION_MOMENTUM_WINDOW // 2)).mean()
+        infl_trend = infl.rolling(
+            window=INFLATION_MOMENTUM_WINDOW,
+            min_periods=max(3, INFLATION_MOMENTUM_WINDOW // 2)
+        ).mean()
         df["inflation_momentum"] = infl - infl_trend
         df["inflation_momentum_z"] = robust_zscore_adaptive(df["inflation_momentum"])
 
-        # Composite inflation score: higher = more inflation pressure (worse for Goldilocks)
         df["inflation_score"] = 0.6 * df["inflation_level_z"] + 0.4 * df["inflation_momentum_z"]
 
     # ---------------------------
     # Policy block
     # ---------------------------
-    if "repo_rate" in df.columns and ("cpi_headline_index_yoy_change" in df.columns or "cpi_headline_index_mom_change" in df.columns):
-        infl_for_real_rate = (
-            df["cpi_headline_index_yoy_change"]
-            if "cpi_headline_index_yoy_change" in df.columns
-            else df["cpi_headline_index_mom_change"]
-        )
-        df["real_policy_rate"] = df["repo_rate"] - infl_for_real_rate
+    # Real policy rate is meaningful only against an inflation expectation proxy (YoY CPI here).
+    if "repo_rate" in df.columns and "cpi_headline_index_yoy_change" in df.columns:
+        df["real_policy_rate"] = df["repo_rate"] - df["cpi_headline_index_yoy_change"]
         df["real_policy_rate_z"] = robust_zscore_adaptive(df["real_policy_rate"])
 
         # tighter policy = more negative score
@@ -200,20 +207,22 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
         oil = df["oil_mom_change"].rolling(window=EXTERNAL_SMOOTH_WINDOW, min_periods=1).mean()
         df["oil_z"] = robust_zscore_adaptive(oil)
 
-    if "usd_inr_mom_change" in df.columns:
+    if "usd_inr_3m_change" in df.columns:
+        df["usd_inr_z"] = robust_zscore_adaptive(df["usd_inr_3m_change"])
+    elif "usd_inr_mom_change" in df.columns:
         fx = df["usd_inr_mom_change"].rolling(window=EXTERNAL_SMOOTH_WINDOW, min_periods=1).mean()
         df["usd_inr_z"] = robust_zscore_adaptive(fx)
 
     if "oil_z" in df.columns and "usd_inr_z" in df.columns:
-        # oil up = bad for India
-        # USD/INR up = INR weaker = bad for India
         df["external_score"] = -0.7 * df["oil_z"] - 0.3 * df["usd_inr_z"]
     elif "oil_z" in df.columns:
         df["external_score"] = -df["oil_z"]
     elif "usd_inr_z" in df.columns:
         df["external_score"] = -df["usd_inr_z"]
 
-    # Optional smoothing to reduce month-to-month regime flips
+    # -------------------------------------------------
+    # Smooth classification inputs to reduce regime flips
+    # -------------------------------------------------
     for col in ["growth_score", "inflation_score", "policy_score", "external_score"]:
         if col in df.columns:
             df[f"{col}_smoothed"] = df[col].rolling(window=SMOOTHING_WINDOW, min_periods=1).mean()
@@ -224,42 +233,63 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 def classify_regime(row: pd.Series):
     g = row.get("growth_score_smoothed", row.get("growth_score"))
     i = row.get("inflation_score_smoothed", row.get("inflation_score"))
+    infl_mom = row.get("inflation_momentum_z")
+    cpi_actual = row.get("cpi_level_actual")
 
     if pd.isna(g) or pd.isna(i):
         return None, None
 
     g = float(g)
     i = float(i)
+    infl_mom_val = None if pd.isna(infl_mom) else float(infl_mom)
+    cpi_actual_val = None if pd.isna(cpi_actual) else float(cpi_actual)
 
-    # Neutral / transition band to avoid overreacting to tiny deviations around 0
+    # Neutral / transition band
     if abs(g) < REGIME_THRESHOLD and abs(i) < REGIME_THRESHOLD:
         return "Neutral / Transition", "Signals are close to trend; regime is not strongly defined"
 
-    # Note: inflation_score > 0 means inflation pressure is ABOVE its recent baseline (level+momentum)
     if g > REGIME_THRESHOLD and i < -REGIME_THRESHOLD:
         return "Goldilocks Expansion", "Growth is above trend while inflation pressure is easing"
-    if g > REGIME_THRESHOLD and i > REGIME_THRESHOLD:
-        return "Overheating Economy", "Growth is strong but inflation pressure is building"
-    if g < -REGIME_THRESHOLD and i > REGIME_THRESHOLD:
-        return "Stagflation Risk", "Growth is below trend while inflation pressure remains elevated"
+
+    if (
+        g > REGIME_THRESHOLD
+        and i > REGIME_THRESHOLD
+        and cpi_actual_val is not None
+        and cpi_actual_val >= OVERHEATING_CPI_MIN
+    ):
+        return "Overheating Economy", "Growth is strong and inflation pressure is meaningfully elevated"
+
+    if (
+        g < -STAGFLATION_G_THRESHOLD
+        and i > STAGFLATION_I_THRESHOLD
+        and cpi_actual_val is not None
+        and cpi_actual_val >= STAGFLATION_CPI_MIN
+    ):
+        if (not STAGFLATION_REQUIRE_HEATING) or (infl_mom_val is not None and infl_mom_val >= 0):
+            return "Stagflation Risk", "Growth is weak while inflation is elevated and not clearly cooling"
+
     if g < -REGIME_THRESHOLD and i < -REGIME_THRESHOLD:
         return "Slowdown / Disinflation", "Growth is below trend and inflation pressure is easing"
 
-    # Mixed/weak cases: keep a stable label rather than forcing a quadrant call
     if g > REGIME_THRESHOLD and abs(i) <= REGIME_THRESHOLD:
         return "Expansion (Inflation Neutral)", "Growth is above trend; inflation pressure is near baseline"
+
     if g < -REGIME_THRESHOLD and abs(i) <= REGIME_THRESHOLD:
         return "Slowdown (Inflation Neutral)", "Growth is below trend; inflation pressure is near baseline"
+
     if i > REGIME_THRESHOLD and abs(g) <= REGIME_THRESHOLD:
-        return "Inflation Shock (Growth Neutral)", "Inflation pressure is elevated; growth is near baseline"
+        if cpi_actual_val is not None and cpi_actual_val >= STAGFLATION_CPI_MIN:
+            return "Inflation Shock (Growth Neutral)", "Inflation pressure is elevated while growth is near baseline"
+        return "Inflation Firming (Growth Neutral)", "Inflation is running above trend, but not at a clearly problematic level"
+
     if i < -REGIME_THRESHOLD and abs(g) <= REGIME_THRESHOLD:
         return "Disinflation (Growth Neutral)", "Inflation pressure is easing; growth is near baseline"
 
-    return None, None
+    return "Neutral / Mixed", "Signals are mixed and do not point to a strong regime tilt"
 
 
 def build_rows(df: pd.DataFrame):
-    df = df.reset_index()
+    df = df.reset_index().rename(columns={"index": "as_of_date"})
 
     df[["regime_label", "explanation"]] = df.apply(
         lambda r: pd.Series(classify_regime(r)),
@@ -272,46 +302,48 @@ def build_rows(df: pd.DataFrame):
         if pd.isna(r.get("regime_label")):
             continue
 
-        # Driver tags for UI + agent grounding (optional, to avoid breaking DB schema)
+        # -------------------------------------------------
+        # CRITICAL FIX 2:
+        # Store the same values actually used to classify.
+        # -------------------------------------------------
+        g_used = r.get("growth_score_smoothed", r.get("growth_score"))
+        i_used = r.get("inflation_score_smoothed", r.get("inflation_score"))
+        p_used = r.get("policy_score_smoothed", r.get("policy_score"))
+        e_used = r.get("external_score_smoothed", r.get("external_score"))
+
         driver_tags: list[str] = []
-        policy = r.get("policy_score_smoothed", r.get("policy_score"))
-        external = r.get("external_score_smoothed", r.get("external_score"))
         infl_mom = r.get("inflation_momentum_z")
 
-        if pd.notna(policy) and float(policy) < -0.75:
+        if pd.notna(p_used) and float(p_used) < -0.75:
             driver_tags.append("policy_tight")
-        if pd.notna(policy) and float(policy) > 0.75:
+        if pd.notna(p_used) and float(p_used) > 0.75:
             driver_tags.append("policy_supportive")
-        if pd.notna(external) and float(external) < -0.75:
+        if pd.notna(e_used) and float(e_used) < -0.75:
             driver_tags.append("external_stress")
-        if pd.notna(external) and float(external) > 0.75:
+        if pd.notna(e_used) and float(e_used) > 0.75:
             driver_tags.append("external_tailwind")
         if pd.notna(infl_mom) and float(infl_mom) > 0.75:
             driver_tags.append("inflation_heating")
         if pd.notna(infl_mom) and float(infl_mom) < -0.75:
             driver_tags.append("inflation_cooling")
 
-        # Simple confidence: how much of the core blocks are present + signal strength
-        core_vals = [
-            r.get("growth_score"),
-            r.get("inflation_score"),
-            r.get("policy_score"),
-            r.get("external_score"),
-        ]
+        core_vals = [g_used, i_used, p_used, e_used]
         available_frac = sum(pd.notna(v) for v in core_vals) / 4.0
+
         strength = 0.0
-        for v in [r.get("growth_score_smoothed"), r.get("inflation_score_smoothed")]:
+        for v in [g_used, i_used]:
             if pd.notna(v):
-                strength += min(abs(float(v)) / 2.0, 1.0)  # cap at |z|=2
-        strength = strength / 2.0  # 0..1
+                strength += min(abs(float(v)) / 2.0, 1.0)
+        strength = strength / 2.0
+
         confidence = round(0.7 * available_frac + 0.3 * strength, 3)
 
         row_out = {
             "as_of_date": str(pd.to_datetime(r["as_of_date"]).date()),
-            "growth_score": round(float(r["growth_score"]), 4) if pd.notna(r.get("growth_score")) else None,
-            "inflation_score": round(float(r["inflation_score"]), 4) if pd.notna(r.get("inflation_score")) else None,
-            "policy_score": round(float(r["policy_score"]), 4) if pd.notna(r.get("policy_score")) else None,
-            "external_score": round(float(r["external_score"]), 4) if pd.notna(r.get("external_score")) else None,
+            "growth_score": round(float(g_used), 4) if pd.notna(g_used) else None,
+            "inflation_score": round(float(i_used), 4) if pd.notna(i_used) else None,
+            "policy_score": round(float(p_used), 4) if pd.notna(p_used) else None,
+            "external_score": round(float(e_used), 4) if pd.notna(e_used) else None,
             "regime_label": r["regime_label"],
             "explanation": r["explanation"]
         }
@@ -348,6 +380,25 @@ def upsert_rows(rows):
 def main():
     df = load_macro_features()
     df = compute_scores(df)
+
+    debug_cols = [
+        col for col in [
+            "growth_score",
+            "growth_score_smoothed",
+            "inflation_score",
+            "inflation_score_smoothed",
+            "policy_score",
+            "policy_score_smoothed",
+            "external_score",
+            "external_score_smoothed",
+            "cpi_level_actual",
+            "inflation_momentum_z"
+        ] if col in df.columns
+    ]
+    if debug_cols:
+        print("Debug preview:")
+        print(df[debug_cols].tail(12))
+
     rows = build_rows(df)
     upsert_rows(rows)
 
