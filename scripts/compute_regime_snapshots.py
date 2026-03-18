@@ -18,6 +18,7 @@ EXTERNAL_SMOOTH_WINDOW = 3
 ENABLE_REGIME_METADATA = os.getenv("ENABLE_REGIME_METADATA", "0").strip() in {"1", "true", "True", "yes", "YES"}
 REGIME_VERSION = "v2_growth_inflation_level_momentum_overlay"
 EARLY_MIN_PERIODS = 6
+REGIME_THRESHOLD = float(os.getenv("REGIME_THRESHOLD", "0.35"))  # z-score units; adds a neutral band
 
 
 def safe_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | None = None) -> pd.Series:
@@ -227,15 +228,32 @@ def classify_regime(row: pd.Series):
     if pd.isna(g) or pd.isna(i):
         return None, None
 
+    g = float(g)
+    i = float(i)
+
+    # Neutral / transition band to avoid overreacting to tiny deviations around 0
+    if abs(g) < REGIME_THRESHOLD and abs(i) < REGIME_THRESHOLD:
+        return "Neutral / Transition", "Signals are close to trend; regime is not strongly defined"
+
     # Note: inflation_score > 0 means inflation pressure is ABOVE its recent baseline (level+momentum)
-    if g > 0 and i < 0:
+    if g > REGIME_THRESHOLD and i < -REGIME_THRESHOLD:
         return "Goldilocks Expansion", "Growth is above trend while inflation pressure is easing"
-    if g > 0 and i > 0:
+    if g > REGIME_THRESHOLD and i > REGIME_THRESHOLD:
         return "Overheating Economy", "Growth is strong but inflation pressure is building"
-    if g < 0 and i > 0:
+    if g < -REGIME_THRESHOLD and i > REGIME_THRESHOLD:
         return "Stagflation Risk", "Growth is below trend while inflation pressure remains elevated"
-    if g < 0 and i < 0:
+    if g < -REGIME_THRESHOLD and i < -REGIME_THRESHOLD:
         return "Slowdown / Disinflation", "Growth is below trend and inflation pressure is easing"
+
+    # Mixed/weak cases: keep a stable label rather than forcing a quadrant call
+    if g > REGIME_THRESHOLD and abs(i) <= REGIME_THRESHOLD:
+        return "Expansion (Inflation Neutral)", "Growth is above trend; inflation pressure is near baseline"
+    if g < -REGIME_THRESHOLD and abs(i) <= REGIME_THRESHOLD:
+        return "Slowdown (Inflation Neutral)", "Growth is below trend; inflation pressure is near baseline"
+    if i > REGIME_THRESHOLD and abs(g) <= REGIME_THRESHOLD:
+        return "Inflation Shock (Growth Neutral)", "Inflation pressure is elevated; growth is near baseline"
+    if i < -REGIME_THRESHOLD and abs(g) <= REGIME_THRESHOLD:
+        return "Disinflation (Growth Neutral)", "Inflation pressure is easing; growth is near baseline"
 
     return None, None
 
