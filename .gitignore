@@ -3,4 +3,4 @@
 __pycache__/
 *.pyc
 .DS_Store
-monthly_pipeline.log
+monthly_pipeline.log~.xlsx
