@@ -27,6 +27,9 @@ STAGFLATION_I_THRESHOLD = float(os.getenv("STAGFLATION_I_THRESHOLD", "0.6"))
 STAGFLATION_REQUIRE_HEATING = os.getenv("STAGFLATION_REQUIRE_HEATING", "1").strip() in {"1", "true", "True", "yes", "YES"}
 STAGFLATION_CPI_MIN = float(os.getenv("STAGFLATION_CPI_MIN", "4.0"))
 OVERHEATING_CPI_MIN = float(os.getenv("OVERHEATING_CPI_MIN", "4.5"))
+# Optional CPI base/methodology break date (month-start). Example: "2026-01-01".
+# If set, inflation z-scores are computed separately pre/post break and then stitched.
+CPI_BREAK_DATE = os.getenv("CPI_BREAK_DATE")
 
 
 def safe_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | None = None) -> pd.Series:
@@ -89,6 +92,21 @@ def weighted_rowwise_average(df: pd.DataFrame, inputs: list[tuple[str, float]]) 
 
     out = numer / denom
     return out.mask(denom == 0)
+
+
+def zscore_with_optional_break(series: pd.Series, break_date: str | None) -> pd.Series:
+    if not break_date:
+        return robust_zscore_adaptive(series)
+
+    bd = pd.to_datetime(break_date)
+    pre = series.loc[series.index < bd]
+    post = series.loc[series.index >= bd]
+
+    z_pre = robust_zscore_adaptive(pre) if not pre.empty else pre
+    z_post = robust_zscore_adaptive(post) if not post.empty else post
+
+    out = pd.concat([z_pre, z_post]).sort_index()
+    return out.reindex(series.index)
 
 
 def load_macro_features() -> pd.DataFrame:
@@ -186,7 +204,9 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
         # so only store YoY CPI here (leave NA if only MoM is available).
         df["cpi_level_actual"] = cpi_yoy
 
-        df["inflation_level_z"] = robust_zscore_adaptive(infl_level_series)
+        # If CPI methodology/base changes, stitch z-scores across the break rather than forcing
+        # a single baseline across incomparable measurement regimes.
+        df["inflation_level_z"] = zscore_with_optional_break(infl_level_series, CPI_BREAK_DATE)
 
         infl = infl_level_series
         infl_trend = infl.rolling(
@@ -194,7 +214,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
             min_periods=max(3, INFLATION_MOMENTUM_WINDOW // 2)
         ).mean()
         df["inflation_momentum"] = infl - infl_trend
-        df["inflation_momentum_z"] = robust_zscore_adaptive(df["inflation_momentum"])
+        df["inflation_momentum_z"] = zscore_with_optional_break(df["inflation_momentum"], CPI_BREAK_DATE)
 
         df["inflation_score"] = 0.6 * df["inflation_level_z"] + 0.4 * df["inflation_momentum_z"]
 
