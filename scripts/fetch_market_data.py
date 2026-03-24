@@ -14,8 +14,7 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 
-def fetch_series(series_id, name, unit="index"):
-
+def fetch_series(series_id, name, unit="index", resample_to_monthly_mean=False):
     try:
         data = fred.get_series(series_id)
     except Exception as e:
@@ -28,8 +27,17 @@ def fetch_series(series_id, name, unit="index"):
     })
 
     df = df.dropna()
-
     df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date")
+
+    # If daily data should be converted to monthly average
+    if resample_to_monthly_mean:
+        df = (
+            df.set_index("date")
+            .resample("MS")["value"]
+            .mean()
+            .reset_index()
+        )
 
     # keep only 2022–2026
     df = df[(df["date"].dt.year >= 2022) & (df["date"].dt.year <= 2026)]
@@ -51,7 +59,6 @@ def fetch_series(series_id, name, unit="index"):
 
 
 def upsert(rows):
-
     if not rows:
         print("No rows to insert")
         return
@@ -65,14 +72,20 @@ def upsert(rows):
 
 
 def main():
-
+    # Monthly series from FRED
     bond_rows = fetch_series("INDIRLTLT01STM", "INDIA_10Y_YIELD", "percent")
     print("Bond rows:", len(bond_rows))
 
     fx_rows = fetch_series("CCUSMA02INM618N", "USD_INR", "inr_per_usd")
     print("FX rows:", len(fx_rows))
 
-    oil_rows = fetch_series("WTISPLC", "CRUDE_OIL_WTI", "usd_per_barrel")
+    # Daily Brent -> monthly mean
+    oil_rows = fetch_series(
+        "DCOILBRENTEU",
+        "CRUDE_OIL_BRENT",
+        "usd_per_barrel",
+        resample_to_monthly_mean=True
+    )
     print("Oil rows:", len(oil_rows))
 
     upsert(bond_rows)

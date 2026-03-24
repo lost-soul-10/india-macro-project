@@ -10,45 +10,29 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
-Z_WINDOW = 36
+Z_WINDOW = 12
 FFILL_LIMIT = 6
 SMOOTHING_WINDOW = 3
 INFLATION_MOMENTUM_WINDOW = 6
 EXTERNAL_SMOOTH_WINDOW = 3
+
 ENABLE_REGIME_METADATA = os.getenv("ENABLE_REGIME_METADATA", "0").strip() in {"1", "true", "True", "yes", "YES"}
-REGIME_VERSION = "v4_monthly_resampled_classification_aligned"
+REGIME_VERSION = "v9_policy_zscore_with_date_cutoff"
+
 EARLY_MIN_PERIODS = 6
 REGIME_THRESHOLD = float(os.getenv("REGIME_THRESHOLD", "0.35"))
-POLICY_IMPULSE_LAG_MONTHS = int(os.getenv("POLICY_IMPULSE_LAG_MONTHS", "6"))
-POLICY_IMPULSE_WEIGHT = float(os.getenv("POLICY_IMPULSE_WEIGHT", "0.6"))
-POLICY_STANCE_WEIGHT = float(os.getenv("POLICY_STANCE_WEIGHT", "0.4"))
 STAGFLATION_G_THRESHOLD = float(os.getenv("STAGFLATION_G_THRESHOLD", "0.6"))
 STAGFLATION_I_THRESHOLD = float(os.getenv("STAGFLATION_I_THRESHOLD", "0.6"))
 STAGFLATION_REQUIRE_HEATING = os.getenv("STAGFLATION_REQUIRE_HEATING", "1").strip() in {"1", "true", "True", "yes", "YES"}
 STAGFLATION_CPI_MIN = float(os.getenv("STAGFLATION_CPI_MIN", "4.0"))
 OVERHEATING_CPI_MIN = float(os.getenv("OVERHEATING_CPI_MIN", "4.5"))
-# Optional CPI base/methodology break date (month-start). Example: "2026-01-01".
-# If set, inflation z-scores are computed separately pre/post break and then stitched.
+
 CPI_BREAK_DATE = os.getenv("CPI_BREAK_DATE")
-
-
-def safe_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | None = None) -> pd.Series:
-    if min_periods is None:
-        min_periods = max(6, window // 2)
-
-    rolling_mean = series.rolling(window=window, min_periods=min_periods).mean()
-    rolling_std = series.rolling(window=window, min_periods=min_periods).std()
-    rolling_std = rolling_std.mask(rolling_std == 0)
-
-    z = (series - rolling_mean) / rolling_std
-    return z.replace([float("inf"), float("-inf")], pd.NA)
+WPI_BREAK_DATE = os.getenv("WPI_BREAK_DATE")
+LATEST_ALLOWED_DATE = os.getenv("LATEST_ALLOWED_DATE")
 
 
 def robust_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | None = None) -> pd.Series:
-    """
-    Rolling robust z-score using median and MAD.
-    Uses MAD scaling factor 1.4826 so it is comparable to std for normal data.
-    """
     if min_periods is None:
         min_periods = max(EARLY_MIN_PERIODS, window // 3)
 
@@ -61,10 +45,6 @@ def robust_zscore(series: pd.Series, window: int = Z_WINDOW, min_periods: int | 
 
 
 def robust_zscore_adaptive(series: pd.Series, window: int = Z_WINDOW) -> pd.Series:
-    """
-    Rolling robust z-score, but falls back to an expanding baseline early in the sample.
-    This helps produce usable historical scores even when you have < window observations.
-    """
     s = series.astype("float64")
 
     exp_med = s.expanding(min_periods=EARLY_MIN_PERIODS).median()
@@ -73,16 +53,12 @@ def robust_zscore_adaptive(series: pd.Series, window: int = Z_WINDOW) -> pd.Seri
     exp_z = (s - exp_med) / exp_denom
 
     roll_z = robust_zscore(s, window=window)
-
     out = roll_z.where(roll_z.notna(), exp_z)
+
     return out.replace([float("inf"), float("-inf")], pd.NA)
 
 
 def weighted_rowwise_average(df: pd.DataFrame, inputs: list[tuple[str, float]]) -> pd.Series:
-    """
-    Weighted average per-row, renormalizing weights to available (non-NA) inputs.
-    Prevents missing series from being treated as 0 and biasing the score.
-    """
     cols = [c for c, _ in inputs]
     weights = pd.Series({c: w for c, w in inputs}, dtype="float64")
 
@@ -109,14 +85,77 @@ def zscore_with_optional_break(series: pd.Series, break_date: str | None) -> pd.
     return out.reindex(series.index)
 
 
-def load_macro_features() -> pd.DataFrame:
-    result = (
-        supabase.table("macro_features")
-        .select("as_of_date,feature_name,feature_value")
-        .execute()
-    )
+def map_regime_bucket(regime_label: str) -> str:
+    if regime_label == "Overheating Economy":
+        return "Overheating"
+    if regime_label in ["Goldilocks Expansion", "Expansion (Inflation Neutral)"]:
+        return "Expansion"
+    if regime_label in ["Slowdown / Disinflation", "Slowdown (Inflation Neutral)"]:
+        return "Slowdown"
+    if regime_label == "Disinflation (Growth Neutral)":
+        return "Disinflation"
+    if regime_label in ["Inflation Shock (Growth Neutral)", "Stagflation Risk"]:
+        return "Stagflation"
+    if regime_label in ["Neutral / Transition", "Neutral / Mixed", "Inflation Firming (Growth Neutral)"]:
+        return "Neutral / Mixed"
+    return "Neutral / Mixed"
 
-    df = pd.DataFrame(result.data)
+
+def map_regime_color(regime_bucket: str) -> str:
+    color_map = {
+        "Overheating": "#C96A2B",
+        "Expansion": "#2F8F83",
+        "Slowdown": "#4B7BEC",
+        "Disinflation": "#6C8AE4",
+        "Stagflation": "#B24C63",
+        "Neutral / Mixed": "#8B7CF6",
+        "Default": "#9CA3AF",
+    }
+    return color_map.get(regime_bucket, color_map["Default"])
+
+
+def score_band(value) -> str:
+    if pd.isna(value):
+        return "missing"
+
+    v = float(value)
+    if v <= -1.0:
+        return "strong_negative"
+    if v <= -0.35:
+        return "negative"
+    if v < 0.35:
+        return "neutral"
+    if v < 1.0:
+        return "positive"
+    return "strong_positive"
+
+
+def load_macro_features() -> pd.DataFrame:
+    all_rows = []
+    page_size = 1000
+    start = 0
+
+    while True:
+        result = (
+            supabase.table("macro_features")
+            .select("as_of_date,feature_name,feature_value")
+            .order("as_of_date")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+
+        batch = result.data or []
+        if not batch:
+            break
+
+        all_rows.extend(batch)
+
+        if len(batch) < page_size:
+            break
+
+        start += page_size
+
+    df = pd.DataFrame(all_rows)
 
     if df.empty:
         print("macro_features table is empty")
@@ -133,25 +172,20 @@ def load_macro_features() -> pd.DataFrame:
     )
 
     df = df.sort_index()
-
-    # -------------------------------------------------
-    # CRITICAL FIX 1:
-    # Force mixed-frequency feature rows onto a clean
-    # monthly month-start regime calendar.
-    # -------------------------------------------------
     df = df.resample("MS").last()
-
-    # Forward fill slower-moving / released-less-frequently data
     df = df.ffill(limit=FFILL_LIMIT)
 
-    # Policy rate is a step function: it remains in effect until changed.
-    # For regime calendars, it should carry forward without a short limit,
-    # otherwise it disappears (NaN) a few months after the last decision date.
     if "repo_rate" in df.columns:
         df["repo_rate"] = df["repo_rate"].ffill()
 
+    if LATEST_ALLOWED_DATE:
+        cutoff = pd.to_datetime(LATEST_ALLOWED_DATE)
+        df = df.loc[df.index <= cutoff]
+
+    print("Loaded macro_features rows:", len(all_rows))
     print("Available columns:")
     print(df.columns.tolist())
+    print("Max date after resample/cutoff:", df.index.max())
     print("Monthly index preview:")
     print(df.index[-12:])
 
@@ -159,9 +193,7 @@ def load_macro_features() -> pd.DataFrame:
 
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
-    # ---------------------------
-    # Growth block
-    # ---------------------------
+    # Growth
     if "gdp_growth_real" in df.columns and "gdp_growth_4q_avg" in df.columns:
         df["gdp_signal"] = df["gdp_growth_real"] - df["gdp_growth_4q_avg"]
         df["gdp_z"] = robust_zscore_adaptive(df["gdp_signal"])
@@ -191,57 +223,51 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     if growth_inputs:
         df["growth_score"] = weighted_rowwise_average(df, growth_inputs)
 
-    # ---------------------------
-    # Inflation block
-    # ---------------------------
-    if "cpi_headline_index_yoy_change" in df.columns or "cpi_headline_index_mom_change" in df.columns:
-        cpi_yoy = df["cpi_headline_index_yoy_change"] if "cpi_headline_index_yoy_change" in df.columns else None
-        infl_level_series = (
-            cpi_yoy if cpi_yoy is not None else df["cpi_headline_index_mom_change"]
-        )
-
-        # Guardrails (STAGFLATION_CPI_MIN / OVERHEATING_CPI_MIN) are defined in YoY % terms,
-        # so only store YoY CPI here (leave NA if only MoM is available).
+    # Inflation
+    if "cpi_headline_index_yoy_change" in df.columns:
+        cpi_yoy = df["cpi_headline_index_yoy_change"]
         df["cpi_level_actual"] = cpi_yoy
 
-        # If CPI methodology/base changes, stitch z-scores across the break rather than forcing
-        # a single baseline across incomparable measurement regimes.
-        df["inflation_level_z"] = zscore_with_optional_break(infl_level_series, CPI_BREAK_DATE)
+        df["cpi_yoy_smooth"] = cpi_yoy.rolling(window=3, min_periods=2).mean()
+        df["inflation_level_z"] = zscore_with_optional_break(df["cpi_yoy_smooth"], CPI_BREAK_DATE)
 
-        infl = infl_level_series
-        infl_trend = infl.rolling(
+        df["cpi_yoy_trend"] = df["cpi_yoy_smooth"].rolling(
             window=INFLATION_MOMENTUM_WINDOW,
             min_periods=max(3, INFLATION_MOMENTUM_WINDOW // 2)
         ).mean()
-        df["inflation_momentum"] = infl - infl_trend
+
+        df["inflation_momentum"] = df["cpi_yoy_smooth"] - df["cpi_yoy_trend"]
         df["inflation_momentum_z"] = zscore_with_optional_break(df["inflation_momentum"], CPI_BREAK_DATE)
 
-        df["inflation_score"] = 0.6 * df["inflation_level_z"] + 0.4 * df["inflation_momentum_z"]
+        df["inflation_score_cpi_core"] = 0.7 * df["inflation_level_z"] + 0.3 * df["inflation_momentum_z"]
+        df["inflation_score"] = df["inflation_score_cpi_core"]
+    else:
+        df["cpi_level_actual"] = pd.NA
 
-    # ---------------------------
-    # Policy block
-    # ---------------------------
-    # Repo is a step function; for a monthly policy signal use "stance + impulse".
-    # - Stance: level of real policy rate (restrictive vs accommodative)
-    # - Impulse: change in real policy rate over POLICY_IMPULSE_LAG_MONTHS (tightening vs easing)
+    # Optional WPI add-on
+    if "wpi_yoy_change" in df.columns:
+        df["wpi_yoy_smooth"] = df["wpi_yoy_change"].rolling(window=3, min_periods=2).mean()
+        df["wpi_level_z"] = zscore_with_optional_break(df["wpi_yoy_smooth"], WPI_BREAK_DATE)
+
+        if "inflation_score_cpi_core" in df.columns:
+            df["inflation_score"] = weighted_rowwise_average(
+                df,
+                [
+                    ("inflation_score_cpi_core", 0.8),
+                    ("wpi_level_z", 0.2),
+                ]
+            )
+        else:
+            df["inflation_score"] = df["wpi_level_z"]
+
+    # Policy
     if "repo_rate" in df.columns and "cpi_headline_index_yoy_change" in df.columns:
         df["real_policy_rate"] = df["repo_rate"] - df["cpi_headline_index_yoy_change"]
+        df["real_policy_rate_smooth"] = df["real_policy_rate"].rolling(window=3, min_periods=1).mean()
+        df["real_policy_rate_z"] = robust_zscore_adaptive(df["real_policy_rate_smooth"])
+        df["policy_score"] = -df["real_policy_rate_z"]
 
-        df["real_policy_rate_z"] = robust_zscore_adaptive(df["real_policy_rate"])
-
-        df["real_policy_impulse"] = df["real_policy_rate"] - df["real_policy_rate"].shift(POLICY_IMPULSE_LAG_MONTHS)
-        df["real_policy_impulse_z"] = robust_zscore_adaptive(df["real_policy_impulse"])
-
-        # tighter conditions = more negative score
-        blended = (
-            POLICY_IMPULSE_WEIGHT * df["real_policy_impulse_z"]
-            + POLICY_STANCE_WEIGHT * df["real_policy_rate_z"]
-        )
-        df["policy_score"] = -blended
-
-    # ---------------------------
-    # External block
-    # ---------------------------
+    # External
     if "oil_mom_change" in df.columns:
         oil = df["oil_mom_change"].rolling(window=EXTERNAL_SMOOTH_WINDOW, min_periods=1).mean()
         df["oil_z"] = robust_zscore_adaptive(oil)
@@ -259,9 +285,6 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     elif "usd_inr_z" in df.columns:
         df["external_score"] = -df["usd_inr_z"]
 
-    # -------------------------------------------------
-    # Smooth classification inputs to reduce regime flips
-    # -------------------------------------------------
     for col in ["growth_score", "inflation_score", "policy_score", "external_score"]:
         if col in df.columns:
             df[f"{col}_smoothed"] = df[col].rolling(window=SMOOTHING_WINDOW, min_periods=1).mean()
@@ -283,7 +306,6 @@ def classify_regime(row: pd.Series):
     infl_mom_val = None if pd.isna(infl_mom) else float(infl_mom)
     cpi_actual_val = None if pd.isna(cpi_actual) else float(cpi_actual)
 
-    # Neutral / transition band
     if abs(g) < REGIME_THRESHOLD and abs(i) < REGIME_THRESHOLD:
         return "Neutral / Transition", "Signals are close to trend; regime is not strongly defined"
 
@@ -329,26 +351,21 @@ def classify_regime(row: pd.Series):
 
 def build_rows(df: pd.DataFrame):
     df = df.reset_index().rename(columns={"index": "as_of_date"})
-
-    df[["regime_label", "explanation"]] = df.apply(
-        lambda r: pd.Series(classify_regime(r)),
-        axis=1
-    )
+    df[["regime_label", "explanation"]] = df.apply(lambda r: pd.Series(classify_regime(r)), axis=1)
 
     rows = []
-
     for _, r in df.iterrows():
         if pd.isna(r.get("regime_label")):
             continue
 
-        # -------------------------------------------------
-        # CRITICAL FIX 2:
-        # Store the same values actually used to classify.
-        # -------------------------------------------------
         g_used = r.get("growth_score_smoothed", r.get("growth_score"))
         i_used = r.get("inflation_score_smoothed", r.get("inflation_score"))
         p_used = r.get("policy_score_smoothed", r.get("policy_score"))
         e_used = r.get("external_score_smoothed", r.get("external_score"))
+
+        regime_label = r["regime_label"]
+        regime_bucket = map_regime_bucket(regime_label)
+        regime_color = map_regime_color(regime_bucket)
 
         driver_tags: list[str] = []
         infl_mom = r.get("inflation_momentum_z")
@@ -383,8 +400,14 @@ def build_rows(df: pd.DataFrame):
             "inflation_score": round(float(i_used), 4) if pd.notna(i_used) else None,
             "policy_score": round(float(p_used), 4) if pd.notna(p_used) else None,
             "external_score": round(float(e_used), 4) if pd.notna(e_used) else None,
-            "regime_label": r["regime_label"],
-            "explanation": r["explanation"]
+            "growth_band": score_band(g_used),
+            "inflation_band": score_band(i_used),
+            "policy_band": score_band(p_used),
+            "external_band": score_band(e_used),
+            "regime_label": regime_label,
+            "regime_bucket": regime_bucket,
+            "regime_color": regime_color,
+            "explanation": r["explanation"],
         }
 
         if ENABLE_REGIME_METADATA:
@@ -407,11 +430,7 @@ def upsert_rows(rows):
     for row in rows[-5:]:
         print(row)
 
-    result = supabase.table("regime_snapshots").upsert(
-        rows,
-        on_conflict="as_of_date"
-    ).execute()
-
+    result = supabase.table("regime_snapshots").upsert(rows, on_conflict="as_of_date").execute()
     print("Inserted/updated regime snapshots:", len(rows))
     print(result)
 
@@ -426,14 +445,24 @@ def main():
             "growth_score_smoothed",
             "inflation_score",
             "inflation_score_smoothed",
+            "inflation_score_cpi_core",
+            "inflation_level_z",
+            "inflation_momentum_z",
+            "wpi_level_z",
             "policy_score",
             "policy_score_smoothed",
             "external_score",
             "external_score_smoothed",
             "cpi_level_actual",
-            "inflation_momentum_z"
+            "repo_rate",
+            "real_policy_rate",
+            "real_policy_rate_smooth",
+            "real_policy_rate_z",
+            "cpi_headline_index_yoy_change",
+            "wpi_yoy_change",
         ] if col in df.columns
     ]
+
     if debug_cols:
         print("Debug preview:")
         print(df[debug_cols].tail(12))
