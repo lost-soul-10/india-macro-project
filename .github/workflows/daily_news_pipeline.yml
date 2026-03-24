@@ -1,147 +1,33 @@
-name: Monthly Macro Pipeline
+name: Daily India Macro News Pipeline
 
 on:
-  workflow_dispatch:
   schedule:
-    # Try on the 28th-31st at 01:30 UTC, continue only on the true last day
-    - cron: "30 1 28-31 * *"
+    # 01:30 UTC = 07:00 IST
+    - cron: "30 1 * * *"
+  workflow_dispatch:
 
 jobs:
-  run-monthly-pipeline:
+  fetch-news:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Check if today is the last day of the month
-        id: month_end_check
-        run: |
-          TOMORROW_DAY=$(date -u -d "tomorrow" +%d)
-          if [ "$TOMORROW_DAY" = "01" ]; then
-            echo "is_last_day=true" >> $GITHUB_OUTPUT
-            echo "Today is the last day of the month. Continuing."
-          else
-            echo "is_last_day=false" >> $GITHUB_OUTPUT
-            echo "Today is not the last day of the month. Skipping."
-          fi
-
-      - name: Stop if not month end
-        if: steps.month_end_check.outputs.is_last_day != 'true'
-        run: exit 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Fetch raw macro data
-      - name: Fetch CPI data
+      - name: Run news fetch script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
-          MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
-        run: python scripts/fetch_cpi_mospi.py
-
-      - name: Fetch GDP data
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
-          MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
-        run: python scripts/fetch_gdp_mospi.py
-
-      - name: Fetch GST collection data
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/fetch_gst_collections_revenue.py
-
-      - name: Fetch IIP data
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
-          MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
-        run: python scripts/fetch_iip_mospi.py
-
-      - name: Fetch market data from FRED
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python scripts/fetch_market_data.py
-
-      - name: Fetch repo rate data
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/fetch_repo_rate_rbi.py
-
-      - name: Fetch WPI data
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
-          MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
-        run: python scripts/fetch_wpi_mospi.py
-
-      # Build derived macro features
-      - name: Build CPI features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_cpi_features.py
-
-      - name: Build GDP features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_gdp_features.py
-
-      - name: Build GST features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_gst.py
-
-      - name: Build IIP features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_iip_features.py
-
-      - name: Build market data features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_market_data_features.py
-
-      - name: Build repo features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_repo_features.py
-
-      - name: Build WPI features
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python scripts/build_wpi_features.py
-
-      # Compute final regime snapshots
-      - name: Compute regime snapshots
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          CPI_BREAK_DATE: ${{ secrets.CPI_BREAK_DATE }}
-          WPI_BREAK_DATE: ${{ secrets.WPI_BREAK_DATE }}
-        run: python scripts/compute_regime_snapshots.py
+        run: |
+          python scripts/fetch_news.py
