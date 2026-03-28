@@ -4,3 +4,4 @@ python-dotenv
 supabase
 python-dateutil
 feedparser
+openpyxl>=3.1.0
