@@ -8,3 +8,4 @@ monthly_pipeline.log~.xlsx
 .DS_Store
 *.log
 data/~$*.xlsx
+supabase/
