@@ -112,7 +112,7 @@ EXCLUDE_KEYWORDS = [
     "travel", "tourism", "weekend getaway",
     "neet", "jee", "exam", "cutoff", "admission",
     "stock split", "bonus shares", "rights issue", "ipo listing",
-    "nifty it", "nifty bank", "nifty auto", "small cap", "mid cap",
+    "nifty it", "nifty bank", "nifty auto", "small cap", "mid cap", "CPI(M)", "party worker", "adivasis", "AI agent","digital addiction","CAPF", "Devina Mehra"
 ]
 
 # -----------------------------------
