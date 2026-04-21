@@ -2,11 +2,12 @@ import os
 import ssl
 import time
 from datetime import datetime
+
 import requests
-from dotenv import load_dotenv
-from supabase import create_client
 from dateutil.relativedelta import relativedelta
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
+from supabase import create_client
 from urllib3.poolmanager import PoolManager
 
 load_dotenv()
@@ -47,6 +48,20 @@ class LegacyTLSAdapter(HTTPAdapter):
 
 session = requests.Session()
 session.mount("https://", LegacyTLSAdapter())
+
+
+def safe_float(value):
+    if value is None:
+        return None
+
+    s = str(value).strip()
+    if s == "" or s.lower() == "null":
+        return None
+
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 def login_and_get_token() -> str:
@@ -108,15 +123,6 @@ def fetch_cpi_month(token: str, year: int, month_code: int) -> list[dict]:
     return records
 
 
-def safe_float(value):
-    if value is None:
-        return None
-    s = str(value).strip()
-    if s == "" or s.lower() == "null":
-        return None
-    return float(s)
-
-
 def transform_records(records: list[dict]) -> list[dict]:
     rows = []
 
@@ -125,9 +131,6 @@ def transform_records(records: list[dict]) -> list[dict]:
         sector = (r.get("sector") or "").strip()
 
         if state != "All India" or sector != "Combined":
-            continue
-
-        if r.get("index") is None and r.get("inflation") is None:
             continue
 
         period_date = datetime.strptime(
