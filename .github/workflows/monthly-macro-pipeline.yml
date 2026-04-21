@@ -168,4 +168,5 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           CPI_BREAK_DATE: ${{ secrets.CPI_BREAK_DATE }}
           WPI_BREAK_DATE: ${{ secrets.WPI_BREAK_DATE }}
+          LATEST_ALLOWED_DATE: ${{ secrets.LATEST_ALLOWED_DATE }}
         run: python scripts/compute_regime_snapshots.py
