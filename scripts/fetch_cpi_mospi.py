@@ -24,9 +24,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
 
-# 2012-base endpoint
-CPI_2012_URL = "https://api.mospi.gov.in/api/cpi/getCPIIndex"
-
 # 2024-base endpoint
 CPI_2024_URL = "https://api.mospi.gov.in/api/cpi/getCPIData"
 
@@ -101,49 +98,6 @@ def get_with_retry(url: str, token: str, params: Dict[str, Any]) -> requests.Res
     raise RuntimeError(f"Too many retries for params={params}")
 
 
-def fetch_2012_month(token: str, year: int, month_code: int) -> Optional[Dict[str, Any]]:
-    """
-    2012-base headline CPI:
-    - state_code   = 99 -> All India
-    - sector_code  = 3  -> Combined
-    - group_code   = 0  -> General
-    - subgroup_code= 0.99 -> General-Overall
-    """
-    params = {
-        "base_year": "2012",
-        "series": "Current",
-        "year": str(year),
-        "month_code": str(month_code),
-        "state_code": "99",
-        "group_code": "0",
-        "subgroup_code": "0.99",
-        "sector_code": "3",
-        "page": 1,
-        "Format": "JSON",
-    }
-
-    response = get_with_retry(CPI_2012_URL, token, params)
-    payload = response.json()
-    rows = payload.get("data", [])
-
-    if not rows:
-        print(f"No 2012-base CPI row for {year}-{month_code:02d}")
-        return None
-
-    # Usually this query returns the exact row we want, but we still filter defensively
-    for row in rows:
-        if (
-            str(row.get("state", "")).strip() == "All India"
-            and str(row.get("sector", "")).strip() == "Combined"
-            and str(row.get("group", "")).strip() == "General"
-            and str(row.get("subgroup", "")).strip() == "General-Overall"
-        ):
-            return row
-
-    # fallback
-    return rows[0]
-
-
 def pick_2024_headline_row(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
     For 2024-base API, keep only the headline row:
@@ -193,42 +147,6 @@ def fetch_2024_month(token: str, year: int, month_code: int) -> Optional[Dict[st
         return None
 
     return headline_row
-
-
-def build_rows_from_2012(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    year = int(row["year"])
-    month = str(row["month"]).strip()
-    period_date = parse_period_date(year, month)
-
-    index_value = safe_float(row.get("index"))
-    inflation_value = safe_float(row.get("inflation"))
-
-    out: List[Dict[str, Any]] = []
-
-    if index_value is not None:
-        out.append({
-            "series_name": "CPI_HEADLINE_INDEX",
-            "source": "mospi_2012",
-            "period_date": period_date,
-            "release_date": None,
-            "value": index_value,
-            "unit": "index",
-            "frequency": "monthly",
-        })
-
-    if inflation_value is not None:
-        out.append({
-            "series_name": "CPI_HEADLINE_INFLATION",
-            "source": "mospi_2012",
-            "period_date": period_date,
-            "release_date": None,
-            "value": inflation_value,
-            "unit": "percent",
-            "frequency": "monthly",
-        })
-
-    return out
-
 
 def build_rows_from_2024(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     year = int(row["year"])
@@ -293,16 +211,6 @@ def main() -> None:
     token = login()
     all_rows: List[Dict[str, Any]] = []
 
-    # 2012 base -> use for 2022 to 2025
-    for year in [2022, 2023, 2024, 2025]:
-        for month_code in range(1, 13):
-            print(f"Fetching 2012-base CPI {year}-{month_code:02d}")
-            row = fetch_2012_month(token, year, month_code)
-
-            if row:
-                all_rows.extend(build_rows_from_2012(row))
-
-            time.sleep(0.4)
 
     # 2024 base -> use for 2026
     for month_code in range(1, 13):
