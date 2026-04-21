@@ -1,5 +1,4 @@
 import os
-import ssl
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -7,9 +6,7 @@ from typing import Any, Optional
 import requests
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
 from supabase import create_client
-from urllib3.poolmanager import PoolManager
 
 load_dotenv()
 
@@ -26,29 +23,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
 CPI_URL = "https://api.mospi.gov.in/api/cpi/getCPIData"
 
-
-class LegacyTLSAdapter(HTTPAdapter):
-    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        ctx = ssl.create_default_context()
-
-        if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
-            ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
-        else:
-            raise RuntimeError(
-                "This Python/OpenSSL build does not support OP_LEGACY_SERVER_CONNECT"
-            )
-
-        self.poolmanager = PoolManager(
-            num_pools=connections,
-            maxsize=maxsize,
-            block=block,
-            ssl_context=ctx,
-            **pool_kwargs
-        )
-
-
 session = requests.Session()
-session.mount("https://", LegacyTLSAdapter())
 
 
 def safe_float(value: Any) -> Optional[float]:
@@ -228,6 +203,8 @@ def upsert_rows(rows: list[dict]) -> None:
 
 
 def main():
+    print("OPENSSL_CONF =", os.getenv("OPENSSL_CONF"))
+
     token = login_and_get_token()
 
     latest = get_latest_stored_month()
