@@ -34,8 +34,30 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           cache: "pip"
+
+      - name: Enable legacy OpenSSL server connect for MOSPI
+        run: |
+          cat > openssl_legacy.cnf <<'EOF'
+          openssl_conf = openssl_init
+
+          [openssl_init]
+          ssl_conf = ssl_sect
+
+          [ssl_sect]
+          system_default = system_default_sect
+
+          [system_default_sect]
+          Options = UnsafeLegacyServerConnect
+          EOF
+          echo "OPENSSL_CONF=$GITHUB_WORKSPACE/openssl_legacy.cnf" >> $GITHUB_ENV
+
+      - name: Show Python and OpenSSL
+        run: |
+          python --version
+          python -c "import ssl, os; print(ssl.OPENSSL_VERSION)"
+          python -c "import os; print('OPENSSL_CONF =', os.getenv('OPENSSL_CONF'))"
 
       - name: Install dependencies
         run: |
