@@ -30,9 +30,11 @@ session = requests.Session()
 def safe_float(value: Any) -> Optional[float]:
     if value is None:
         return None
+
     s = str(value).strip()
     if s == "" or s.lower() == "null":
         return None
+
     try:
         return float(s)
     except ValueError:
@@ -109,7 +111,11 @@ def get_with_retry(url: str, token: str, params: Dict[str, Any]) -> requests.Res
             continue
 
         if response.status_code == 401:
-            raise RuntimeError("Unauthorized / token expired. Re-run the script.")
+            raise RuntimeError("Unauthorized or token expired. Re-run the script.")
+
+        if response.status_code >= 400:
+            print("Request params:", params)
+            print("Response text:", response.text)
 
         response.raise_for_status()
         return response
@@ -231,6 +237,8 @@ def upsert(rows: List[Dict[str, Any]]) -> None:
 
 
 def main() -> None:
+    print("OPENSSL_CONF =", os.getenv("OPENSSL_CONF"))
+
     token = login()
     raw_rows = fetch_all_pages(token)
     quarterly_rows = filter_quarterly_gdp_growth(raw_rows)
