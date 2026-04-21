@@ -24,12 +24,14 @@ jobs:
             echo "Today is the last day of the month. Continuing."
           else
             echo "is_last_day=false" >> $GITHUB_OUTPUT
-            echo "Today is not the last day of the month. Skipping."
+            echo "Today is not the last day of the month."
           fi
 
-      - name: Stop if not month end
-        if: steps.month_end_check.outputs.is_last_day != 'true'
-        run: exit 0
+      - name: Stop scheduled runs if not month end
+        if: github.event_name == 'schedule' && steps.month_end_check.outputs.is_last_day != 'true'
+        run: |
+          echo "Scheduled run skipped because today is not month end."
+          exit 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
