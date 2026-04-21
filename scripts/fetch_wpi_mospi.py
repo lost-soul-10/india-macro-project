@@ -1,9 +1,11 @@
 import os
+import time
 from datetime import datetime
+
 import requests
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from supabase import create_client
-from dateutil.relativedelta import relativedelta
 
 load_dotenv()
 
@@ -20,6 +22,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
 WPI_URL = "https://api.mospi.gov.in/api/wpi/getWpiRecords"
 
+session = requests.Session()
+
 
 def login_and_get_token() -> str:
     payload = {
@@ -27,15 +31,15 @@ def login_and_get_token() -> str:
         "password": MOSPI_PASSWORD,
         "organization": "None",
         "purpose": "View/Download the Data",
-        "gender": "Female"
+        "gender": "Female",
     }
 
     headers = {
         "Content-Type": "application/json",
-        "accept": "*/*"
+        "accept": "*/*",
     }
 
-    response = requests.post(LOGIN_URL, json=payload, headers=headers, timeout=30)
+    response = session.post(LOGIN_URL, json=payload, headers=headers, timeout=30)
     response.raise_for_status()
 
     data = response.json()
@@ -50,21 +54,42 @@ def login_and_get_token() -> str:
     return token
 
 
-def fetch_wpi_month(token: str, year: int, month_code: int) -> list[dict]:
+def get_with_retry(url: str, token: str, params: dict) -> requests.Response:
     headers = {
         "Authorization": token,
-        "accept": "*/*"
+        "accept": "*/*",
     }
 
+    for attempt in range(5):
+        response = session.get(url, headers=headers, params=params, timeout=60)
+
+        if response.status_code == 429:
+            wait = min(2 ** attempt, 15)
+            print(f"429 hit. Waiting {wait}s and retrying...")
+            time.sleep(wait)
+            continue
+
+        if response.status_code == 401:
+            raise RuntimeError("Unauthorized or token expired. Re-run the script.")
+
+        if response.status_code >= 400:
+            print("Request params:", params)
+            print("Response text:", response.text)
+
+        response.raise_for_status()
+        return response
+
+    raise RuntimeError(f"Too many retries for params={params}")
+
+
+def fetch_wpi_month(token: str, year: int, month_code: int) -> list[dict]:
     params = {
         "year": str(year),
         "month_code": str(month_code),
-        "Format": "JSON"
+        "Format": "JSON",
     }
 
-    response = requests.get(WPI_URL, headers=headers, params=params, timeout=60)
-    response.raise_for_status()
-
+    response = get_with_retry(WPI_URL, token, params)
     data = response.json()
     records = data.get("data", [])
 
@@ -85,7 +110,7 @@ def transform_records(records: list[dict]) -> list[dict]:
 
         period_date = datetime.strptime(
             f"{r['month']} {int(r['year'])}",
-            "%B %Y"
+            "%B %Y",
         ).date()
 
         rows.append({
@@ -95,7 +120,7 @@ def transform_records(records: list[dict]) -> list[dict]:
             "release_date": None,
             "value": float(r["index_value"]),
             "unit": "index",
-            "frequency": "monthly"
+            "frequency": "monthly",
         })
 
     return rows
@@ -122,7 +147,6 @@ def upsert_rows(rows: list[dict]) -> None:
         print("No WPI rows found to upsert.")
         return
 
-    # Deduplicate before sending to Supabase
     deduped = {
         (row["series_name"], row["period_date"]): row
         for row in rows
@@ -132,7 +156,7 @@ def upsert_rows(rows: list[dict]) -> None:
 
     result = supabase.table("raw_macro_series").upsert(
         final_rows,
-        on_conflict="series_name,period_date"
+        on_conflict="series_name,period_date",
     ).execute()
 
     print(f"Upserted {len(final_rows)} rows")
@@ -140,16 +164,15 @@ def upsert_rows(rows: list[dict]) -> None:
 
 
 def main():
-    token = login_and_get_token()
+    print("OPENSSL_CONF =", os.getenv("OPENSSL_CONF"))
 
+    token = login_and_get_token()
     latest = get_latest_stored_month()
 
     if latest is None:
-        # Initial historical backfill if table is empty
         start_date = datetime(2022, 1, 1)
         print("No WPI data found in Supabase. Starting historical backfill from 2022-01.")
     else:
-        # Start from the month after the latest stored one
         start_date = latest + relativedelta(months=1)
         print(f"Latest stored WPI month: {latest.strftime('%Y-%m-%d')}")
         print(f"Fetching from: {start_date.strftime('%Y-%m')}")
@@ -169,6 +192,7 @@ def main():
         all_rows.extend(rows)
 
         current += relativedelta(months=1)
+        time.sleep(0.4)
 
     upsert_rows(all_rows)
 
