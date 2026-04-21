@@ -2,6 +2,7 @@ import os
 import ssl
 import time
 from datetime import datetime
+from typing import Any, Optional
 
 import requests
 from dateutil.relativedelta import relativedelta
@@ -50,7 +51,7 @@ session = requests.Session()
 session.mount("https://", LegacyTLSAdapter())
 
 
-def safe_float(value):
+def safe_float(value: Any) -> Optional[float]:
     if value is None:
         return None
 
@@ -93,12 +94,35 @@ def login_and_get_token() -> str:
     return token
 
 
-def fetch_cpi_month(token: str, year: int, month_code: int) -> list[dict]:
+def get_with_retry(url: str, token: str, params: dict) -> requests.Response:
     headers = {
         "Authorization": token,
-        "accept": "*/*"
+        "accept": "*/*",
     }
 
+    for attempt in range(5):
+        response = session.get(url, headers=headers, params=params, timeout=60)
+
+        if response.status_code == 429:
+            wait = min(2 ** attempt, 15)
+            print(f"429 hit. Waiting {wait}s and retrying...")
+            time.sleep(wait)
+            continue
+
+        if response.status_code == 401:
+            raise RuntimeError("Unauthorized or token expired. Re-run the script.")
+
+        if response.status_code >= 400:
+            print("Request params:", params)
+            print("Response text:", response.text)
+
+        response.raise_for_status()
+        return response
+
+    raise RuntimeError(f"Too many retries for params={params}")
+
+
+def fetch_cpi_month(token: str, year: int, month_code: int) -> list[dict]:
     params = {
         "base_year": "2024",
         "year": str(year),
@@ -108,12 +132,10 @@ def fetch_cpi_month(token: str, year: int, month_code: int) -> list[dict]:
         "sector_code": "3",
         "division": "0",
         "limit": "100",
-        "page": "1"
+        "page": "1",
     }
 
-    response = session.get(CPI_URL, headers=headers, params=params, timeout=60)
-    response.raise_for_status()
-
+    response = get_with_retry(CPI_URL, token, params)
     data = response.json()
     records = data.get("data", [])
 
