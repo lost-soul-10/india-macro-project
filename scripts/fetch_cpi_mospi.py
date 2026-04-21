@@ -21,7 +21,13 @@ if not all([SUPABASE_URL, SUPABASE_SECRET_KEY, MOSPI_EMAIL, MOSPI_PASSWORD]):
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
+<<<<<<< HEAD
 CPI_URL = "https://api.mospi.gov.in/api/cpi/getCPIData"
+=======
+
+# 2024-base endpoint
+CPI_2024_URL = "https://api.mospi.gov.in/api/cpi/getCPIData"
+>>>>>>> a5c2fd7 (Refactor CPI fetching logic by removing 2012-base endpoint and related functions, focusing on 2024-base CPI data retrieval.)
 
 session = requests.Session()
 
@@ -97,7 +103,34 @@ def get_with_retry(url: str, token: str, params: dict) -> requests.Response:
     raise RuntimeError(f"Too many retries for params={params}")
 
 
+<<<<<<< HEAD
 def fetch_cpi_month(token: str, year: int, month_code: int) -> list[dict]:
+=======
+def pick_2024_headline_row(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    For 2024-base API, keep only the headline row:
+    - All India
+    - Combined
+    - division = CPI (General)
+    - no group/class/sub_class/item breakdown
+    """
+    for row in rows:
+        if (
+            str(row.get("state", "")).strip() == "All India"
+            and str(row.get("sector", "")).strip() == "Combined"
+            and str(row.get("division", "")).strip() == "CPI (General)"
+            and row.get("group") is None
+            and row.get("class") is None
+            and row.get("sub_class") is None
+            and row.get("item") is None
+        ):
+            return row
+
+    return None
+
+
+def fetch_2024_month(token: str, year: int, month_code: int) -> Optional[Dict[str, Any]]:
+>>>>>>> a5c2fd7 (Refactor CPI fetching logic by removing 2012-base endpoint and related functions, focusing on 2024-base CPI data retrieval.)
     params = {
         "base_year": "2024",
         "year": str(year),
@@ -181,7 +214,54 @@ def get_latest_stored_month():
     return datetime.strptime(result.data[0]["period_date"], "%Y-%m-%d")
 
 
+<<<<<<< HEAD
 def upsert_rows(rows: list[dict]) -> None:
+=======
+def build_rows_from_2024(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    year = int(row["year"])
+    month = str(row["month"]).strip()
+    period_date = parse_period_date(year, month)
+
+    index_value = safe_float(row.get("index"))
+    inflation_value = safe_float(row.get("inflation"))
+
+    out: List[Dict[str, Any]] = []
+
+    if index_value is not None:
+        out.append({
+            "series_name": "CPI_HEADLINE_INDEX",
+            "source": "mospi_2024",
+            "period_date": period_date,
+            "release_date": None,
+            "value": index_value,
+            "unit": "index",
+            "frequency": "monthly",
+        })
+
+    if inflation_value is not None:
+        out.append({
+            "series_name": "CPI_HEADLINE_INFLATION",
+            "source": "mospi_2024",
+            "period_date": period_date,
+            "release_date": None,
+            "value": inflation_value,
+            "unit": "percent",
+            "frequency": "monthly",
+        })
+
+    return out
+
+
+def dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (row["series_name"], row["period_date"]): row
+        for row in rows
+    }
+    return list(deduped.values())
+
+
+def upsert(rows: List[Dict[str, Any]]) -> None:
+>>>>>>> a5c2fd7 (Refactor CPI fetching logic by removing 2012-base endpoint and related functions, focusing on 2024-base CPI data retrieval.)
     if not rows:
         print("No CPI rows found to upsert.")
         return
@@ -205,6 +285,7 @@ def upsert_rows(rows: list[dict]) -> None:
 def main():
     print("OPENSSL_CONF =", os.getenv("OPENSSL_CONF"))
 
+<<<<<<< HEAD
     token = login_and_get_token()
 
     latest = get_latest_stored_month()
@@ -219,6 +300,12 @@ def main():
 
     today = datetime.today()
     current = datetime(start_date.year, start_date.month, 1)
+=======
+    # 2024 base -> use for 2026
+    for month_code in range(1, 13):
+        print(f"Fetching 2024-base CPI 2026-{month_code:02d}")
+        row = fetch_2024_month(token, 2026, month_code)
+>>>>>>> a5c2fd7 (Refactor CPI fetching logic by removing 2012-base endpoint and related functions, focusing on 2024-base CPI data retrieval.)
 
     all_rows = []
 
