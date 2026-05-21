@@ -1,145 +1,141 @@
-import os
-import time
-from datetime import datetime
+# fetch_wpi_mospi.py
+# Reads WPI data from Excel and upserts it into raw_macro_series.
 
-import requests
-from dateutil.relativedelta import relativedelta
+from pathlib import Path
+from typing import Any, Optional
+
+import pandas as pd
 from dotenv import load_dotenv
 from supabase import create_client
+import os
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
-MOSPI_EMAIL = os.getenv("MOSPI_EMAIL")
-MOSPI_PASSWORD = os.getenv("MOSPI_PASSWORD")
 
-if not all([SUPABASE_URL, SUPABASE_SECRET_KEY, MOSPI_EMAIL, MOSPI_PASSWORD]):
-    raise ValueError("Missing one or more environment variables in .env")
+if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+    raise ValueError("Missing SUPABASE_URL or SUPABASE_SECRET_KEY in .env")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
-LOGIN_URL = "https://api.mospi.gov.in/api/users/login"
-WPI_URL = "https://api.mospi.gov.in/api/wpi/getWpiRecords"
-
-session = requests.Session()
-
-
-def login_and_get_token() -> str:
-    payload = {
-        "username": MOSPI_EMAIL,
-        "password": MOSPI_PASSWORD,
-        "organization": "None",
-        "purpose": "View/Download the Data",
-        "gender": "Female",
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "accept": "*/*",
-    }
-
-    response = session.post(LOGIN_URL, json=payload, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    data = response.json()
-
-    if not data.get("statusCode"):
-        raise ValueError(f"Login failed: {data}")
-
-    token = data.get("response")
-    if not token or not isinstance(token, str):
-        raise ValueError(f"Token not found in response: {data}")
-
-    return token
+# Hardcoded Excel path.
+# Keep this file in the same data folder as cpi_data.xlsx.
+WPI_EXCEL_PATH = "data/wpi_data.xlsx"
 
 
-def get_with_retry(url: str, token: str, params: dict) -> requests.Response:
-    headers = {
-        "Authorization": token,
-        "accept": "*/*",
-    }
+def safe_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
 
-    for attempt in range(5):
-        response = session.get(url, headers=headers, params=params, timeout=60)
+    s = str(value).strip()
 
-        if response.status_code == 429:
-            wait = min(2 ** attempt, 15)
-            print(f"429 hit. Waiting {wait}s and retrying...")
-            time.sleep(wait)
+    if s == "" or s.lower() in {"nan", "none", "null"}:
+        return None
+
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [
+        str(col).strip().lower().replace(" ", "_")
+        for col in df.columns
+    ]
+    return df
+
+
+def validate_columns(df: pd.DataFrame) -> None:
+    required_columns = [
+        "year",
+        "month",
+        "majorgroup",
+        "group",
+        "index_value",
+    ]
+
+    missing = [col for col in required_columns if col not in df.columns]
+
+    if missing:
+        raise ValueError(f"Missing required WPI Excel columns: {missing}")
+
+
+def load_wpi_excel() -> pd.DataFrame:
+    path = Path(WPI_EXCEL_PATH)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"WPI Excel file not found at {path}. "
+            "Make sure it is saved as data/wpi_data.xlsx."
+        )
+
+    df = pd.read_excel(path)
+    df = clean_columns(df)
+    validate_columns(df)
+
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+    df["month"] = df["month"].astype(str).str.strip()
+    df["majorgroup"] = df["majorgroup"].astype(str).str.strip()
+    df["group"] = df["group"].astype(str).str.strip()
+    df["index_value"] = pd.to_numeric(df["index_value"], errors="coerce")
+
+    df = df.dropna(subset=["year", "month", "index_value"])
+    df["year"] = df["year"].astype(int)
+
+    df["period_date"] = pd.to_datetime(
+        df["month"] + " " + df["year"].astype(str),
+        format="%B %Y",
+        errors="coerce",
+    )
+
+    df = df.dropna(subset=["period_date"])
+
+    return df
+
+
+def transform_rows(df: pd.DataFrame) -> list[dict]:
+    rows: list[dict] = []
+
+    df = df[
+        df["majorgroup"].str.lower().eq("wholesale price index")
+    ].copy()
+
+    if df.empty:
+        raise ValueError("No headline WPI rows found in Excel.")
+
+    for _, row in df.iterrows():
+        value = safe_float(row.get("index_value"))
+
+        if value is None:
             continue
 
-        if response.status_code == 401:
-            raise RuntimeError("Unauthorized or token expired. Re-run the script.")
+        period_date = pd.to_datetime(row["period_date"]).date()
 
-        if response.status_code >= 400:
-            print("Request params:", params)
-            print("Response text:", response.text)
-
-        response.raise_for_status()
-        return response
-
-    raise RuntimeError(f"Too many retries for params={params}")
-
-
-def fetch_wpi_month(token: str, year: int, month_code: int) -> list[dict]:
-    params = {
-        "year": str(year),
-        "month_code": str(month_code),
-        "Format": "JSON",
-    }
-
-    response = get_with_retry(WPI_URL, token, params)
-    data = response.json()
-    records = data.get("data", [])
-
-    if not isinstance(records, list):
-        raise ValueError(f"Unexpected API response for {year}-{month_code}: {data}")
-
-    return records
-
-
-def transform_records(records: list[dict]) -> list[dict]:
-    rows = []
-
-    for r in records:
-        major_group = (r.get("majorgroup") or "").strip()
-
-        if major_group != "Wholesale Price Index":
-            continue
-
-        period_date = datetime.strptime(
-            f"{r['month']} {int(r['year'])}",
-            "%B %Y",
-        ).date()
-
-        rows.append({
-            "series_name": "WPI",
-            "source": "mospi",
-            "period_date": str(period_date),
-            "release_date": None,
-            "value": float(r["index_value"]),
-            "unit": "index",
-            "frequency": "monthly",
-        })
+        rows.append(
+            {
+                "series_name": "WPI",
+                "source": "excel",
+                "period_date": str(period_date),
+                "release_date": None,
+                "value": value,
+                "unit": "index",
+                "frequency": "monthly",
+            }
+        )
 
     return rows
 
 
-def get_latest_stored_month():
-    result = (
-        supabase.table("raw_macro_series")
-        .select("period_date")
-        .eq("series_name", "WPI")
-        .order("period_date", desc=True)
-        .limit(1)
-        .execute()
-    )
+def dedupe_rows(rows: list[dict]) -> list[dict]:
+    deduped = {
+        (row["series_name"], row["period_date"]): row
+        for row in rows
+    }
 
-    if not result.data:
-        return None
-
-    return datetime.strptime(result.data[0]["period_date"], "%Y-%m-%d")
+    return list(deduped.values())
 
 
 def upsert_rows(rows: list[dict]) -> None:
@@ -147,54 +143,42 @@ def upsert_rows(rows: list[dict]) -> None:
         print("No WPI rows found to upsert.")
         return
 
-    deduped = {
-        (row["series_name"], row["period_date"]): row
-        for row in rows
-    }
+    final_rows = dedupe_rows(rows)
 
-    final_rows = list(deduped.values())
+    result = (
+        supabase.table("raw_macro_series")
+        .upsert(final_rows, on_conflict="series_name,period_date")
+        .execute()
+    )
 
-    result = supabase.table("raw_macro_series").upsert(
-        final_rows,
-        on_conflict="series_name,period_date",
-    ).execute()
-
-    print(f"Upserted {len(final_rows)} rows")
+    print(f"Upserted {len(final_rows)} WPI rows into raw_macro_series")
     print(result)
 
 
-def main():
-    print("OPENSSL_CONF =", os.getenv("OPENSSL_CONF"))
+def main() -> None:
+    print(f"WPI_EXCEL_PATH = {WPI_EXCEL_PATH}")
 
-    token = login_and_get_token()
-    latest = get_latest_stored_month()
+    df = load_wpi_excel()
 
-    if latest is None:
-        start_date = datetime(2022, 1, 1)
-        print("No WPI data found in Supabase. Starting historical backfill from 2022-01.")
-    else:
-        start_date = latest + relativedelta(months=1)
-        print(f"Latest stored WPI month: {latest.strftime('%Y-%m-%d')}")
-        print(f"Fetching from: {start_date.strftime('%Y-%m')}")
+    print("Loaded WPI Excel rows:", len(df))
+    print("WPI Excel preview:")
+    print(
+        df[
+            [
+                "year",
+                "month",
+                "majorgroup",
+                "group",
+                "index_value",
+                "period_date",
+            ]
+        ].head(12)
+    )
 
-    today = datetime.today()
-    current = datetime(start_date.year, start_date.month, 1)
+    rows = transform_rows(df)
 
-    all_rows = []
-
-    while current <= today:
-        year = current.year
-        month_code = current.month
-
-        print(f"Fetching WPI for {year}-{month_code:02d}")
-        records = fetch_wpi_month(token, year, month_code)
-        rows = transform_records(records)
-        all_rows.extend(rows)
-
-        current += relativedelta(months=1)
-        time.sleep(0.4)
-
-    upsert_rows(all_rows)
+    print("Prepared WPI rows:", len(rows))
+    upsert_rows(rows)
 
 
 if __name__ == "__main__":

@@ -107,9 +107,7 @@ jobs:
         run: python scripts/fetch_iip_mospi.py
 
       - name: Fetch WPI data from MOSPI
-        env:
-          MOSPI_EMAIL: ${{ secrets.MOSPI_EMAIL }}
-          MOSPI_PASSWORD: ${{ secrets.MOSPI_PASSWORD }}
+      - name: Load WPI data from Excel
         run: python scripts/fetch_wpi_mospi.py
 
       - name: Fetch repo rate data from RBI
