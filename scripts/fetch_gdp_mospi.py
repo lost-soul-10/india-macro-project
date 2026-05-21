@@ -32,6 +32,7 @@ def safe_float(value: Any) -> Optional[float]:
         return None
 
     s = str(value).strip()
+
     if s == "" or s.lower() == "null":
         return None
 
@@ -76,6 +77,7 @@ def login() -> str:
         "purpose": "View/Download the Data",
         "gender": "Female",
     }
+
     headers = {
         "Content-Type": "application/json",
         "accept": "*/*",
@@ -83,12 +85,14 @@ def login() -> str:
 
     response = session.post(LOGIN_URL, json=payload, headers=headers, timeout=30)
     response.raise_for_status()
+
     data = response.json()
 
     if not data.get("statusCode"):
         raise ValueError(f"Login failed: {data}")
 
     token = data.get("response")
+
     if not token:
         raise ValueError(f"Token not found: {data}")
 
@@ -129,11 +133,11 @@ def fetch_all_pages(token: str) -> List[Dict[str, Any]]:
 
     while True:
         params = {
-            "base_year": "2011-12",
+            "base_year": "2022-23",
             "series": "Current",
-            "frequency_code": "02",
-            "indicator_code": "22",  # GDP Growth Rate
-            "year": "2022-23,2023-24,2024-25,2025-26",
+            "frequency_code": "Quarterly",
+            "indicator_code": "22",
+            "year": "2023-24,2024-25,2025-26",
             "quarterly_code": "1,2,3,4",
             "Format": "JSON",
             "page": str(page),
@@ -163,53 +167,43 @@ def fetch_all_pages(token: str) -> List[Dict[str, Any]]:
 
 
 def filter_quarterly_gdp_growth(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = []
+    filtered_rows = []
 
     for row in rows:
         if (
-            str(row.get("indicator", "")).strip() == "GDP Growth Rate"
+            str(row.get("base_year", "")).strip() == "2022-23"
+            and str(row.get("indicator", "")).strip() == "GDP Growth Rate"
             and str(row.get("frequency", "")).strip() == "Quarterly"
             and str(row.get("series", "")).strip() == "Current"
             and row.get("quarter") is not None
+            and row.get("constant_price") is not None
         ):
-            out.append(row)
+            filtered_rows.append(row)
 
-    return out
+    return filtered_rows
 
 
 def build_rows_from_api(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     fy = str(row["year"]).strip()
     quarter = str(row["quarter"]).strip()
+
     period_date = fiscal_quarter_to_period_date(fy, quarter)
+    value = safe_float(row.get("constant_price"))
 
-    nominal = safe_float(row.get("current_price"))
-    real = safe_float(row.get("constant_price"))
+    if value is None:
+        return []
 
-    out: List[Dict[str, Any]] = []
-
-    if nominal is not None:
-        out.append({
-            "series_name": "GDP_GROWTH_NOMINAL_QUARTERLY",
-            "source": "mospi",
-            "period_date": period_date,
-            "release_date": None,
-            "value": nominal,
-            "unit": "percent",
-            "frequency": "quarterly",
-        })
-
-    if real is not None:
-        out.append({
+    return [
+        {
             "series_name": "GDP_GROWTH_REAL_QUARTERLY",
             "source": "mospi",
             "period_date": period_date,
             "release_date": None,
-            "value": real,
+            "value": value,
             "unit": "percent",
             "frequency": "quarterly",
-        })
-
-    return out
+        }
+    ]
 
 
 def dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -217,19 +211,20 @@ def dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         (row["series_name"], row["period_date"]): row
         for row in rows
     }
+
     return list(deduped.values())
 
 
 def upsert(rows: List[Dict[str, Any]]) -> None:
     if not rows:
-        print("No quarterly GDP rows found to upsert.")
+        print("No quarterly real GDP growth rows found to upsert.")
         return
 
     final_rows = dedupe_rows(rows)
 
     result = supabase.table("raw_macro_series").upsert(
         final_rows,
-        on_conflict="series_name,period_date"
+        on_conflict="series_name,period_date",
     ).execute()
 
     print(f"Inserted/updated {len(final_rows)} rows")
@@ -240,10 +235,12 @@ def main() -> None:
     print("OPENSSL_CONF =", os.getenv("OPENSSL_CONF"))
 
     token = login()
+
     raw_rows = fetch_all_pages(token)
     quarterly_rows = filter_quarterly_gdp_growth(raw_rows)
 
     all_rows: List[Dict[str, Any]] = []
+
     for row in quarterly_rows:
         all_rows.extend(build_rows_from_api(row))
 
