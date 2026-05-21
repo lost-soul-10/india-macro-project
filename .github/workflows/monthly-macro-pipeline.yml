@@ -15,6 +15,9 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
+      #FRED market data
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+
       # CPI Excel configuration
       CPI_EXCEL_PATH: data/cpi_data.xlsx
       CPI_BREAK_DATE: ${{ secrets.CPI_BREAK_DATE }}
