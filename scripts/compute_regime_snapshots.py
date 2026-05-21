@@ -15,6 +15,10 @@ if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
+# -------------------------
+# Configuration
+# -------------------------
+
 Z_WINDOW = int(os.getenv("Z_WINDOW", "12"))
 FFILL_LIMIT = int(os.getenv("FFILL_LIMIT", "6"))
 SMOOTHING_WINDOW = int(os.getenv("SMOOTHING_WINDOW", "3"))
@@ -29,9 +33,10 @@ ENABLE_REGIME_METADATA = os.getenv("ENABLE_REGIME_METADATA", "0").strip() in {
     "YES",
 }
 
-REGIME_VERSION = "v10_cpi_break_aware_excel"
+REGIME_VERSION = "v11_strict_scoring_cpi_6m_smooth"
 
-EARLY_MIN_PERIODS = int(os.getenv("EARLY_MIN_PERIODS", "3"))
+# Restored to old stricter behavior.
+EARLY_MIN_PERIODS = int(os.getenv("EARLY_MIN_PERIODS", "6"))
 
 REGIME_THRESHOLD = float(os.getenv("REGIME_THRESHOLD", "0.35"))
 STAGFLATION_G_THRESHOLD = float(os.getenv("STAGFLATION_G_THRESHOLD", "0.6"))
@@ -48,10 +53,16 @@ STAGFLATION_REQUIRE_HEATING = os.getenv("STAGFLATION_REQUIRE_HEATING", "1").stri
 STAGFLATION_CPI_MIN = float(os.getenv("STAGFLATION_CPI_MIN", "4.0"))
 OVERHEATING_CPI_MIN = float(os.getenv("OVERHEATING_CPI_MIN", "4.5"))
 
+# CPI break is still supported because old and new CPI series should not be
+# treated as one directly comparable continuous index history.
 CPI_BREAK_DATE = os.getenv("CPI_BREAK_DATE", "2026-01-01")
 WPI_BREAK_DATE = os.getenv("WPI_BREAK_DATE")
 LATEST_ALLOWED_DATE = os.getenv("LATEST_ALLOWED_DATE")
 
+
+# -------------------------
+# Helper functions
+# -------------------------
 
 def robust_zscore(
     series: pd.Series,
@@ -103,21 +114,6 @@ def robust_zscore_adaptive(
     out = roll_z.where(roll_z.notna(), exp_z)
 
     return out.replace([float("inf"), float("-inf")], pd.NA)
-
-
-def early_level_score(series: pd.Series) -> pd.Series:
-    """
-    Fallback for short CPI history after a methodology break.
-
-    This does not compare old CPI and new CPI directly.
-    It only gives a limited directional score from the actual CPI inflation level
-    until there is enough post-break history for a proper z-score.
-    """
-    s = pd.to_numeric(series, errors="coerce").astype("float64")
-
-    score = (s - STAGFLATION_CPI_MIN) / 2.0
-
-    return score.clip(lower=-1.0, upper=1.0)
 
 
 def weighted_rowwise_average(
@@ -235,6 +231,10 @@ def score_band(value) -> str:
     return "strong_positive"
 
 
+# -------------------------
+# Load macro features
+# -------------------------
+
 def load_macro_features() -> pd.DataFrame:
     all_rows = []
     page_size = 1000
@@ -302,6 +302,10 @@ def load_macro_features() -> pd.DataFrame:
     return df
 
 
+# -------------------------
+# Score calculations
+# -------------------------
+
 def compute_growth_score(df: pd.DataFrame) -> pd.DataFrame:
     if "gdp_growth_real" in df.columns and "gdp_growth_4q_avg" in df.columns:
         df["gdp_signal"] = df["gdp_growth_real"] - df["gdp_growth_4q_avg"]
@@ -361,9 +365,11 @@ def compute_inflation_score(df: pd.DataFrame) -> pd.DataFrame:
 
         df["cpi_level_actual"] = cpi_yoy
 
+        # Updated per your request:
+        # 6-month CPI smoothing with stricter minimum periods.
         df["cpi_yoy_smooth"] = cpi_yoy.rolling(
-            window=3,
-            min_periods=1,
+            window=6,
+            min_periods=3,
         ).mean()
 
         df["inflation_level_z"] = zscore_with_optional_break(
@@ -371,15 +377,10 @@ def compute_inflation_score(df: pd.DataFrame) -> pd.DataFrame:
             CPI_BREAK_DATE,
         )
 
-        fallback_level_score = early_level_score(df["cpi_yoy_smooth"])
-
-        df["inflation_level_z"] = df["inflation_level_z"].fillna(
-            fallback_level_score,
-        )
-
+        # Restored old stricter momentum behavior.
         df["cpi_yoy_trend"] = df["cpi_yoy_smooth"].rolling(
             window=INFLATION_MOMENTUM_WINDOW,
-            min_periods=2,
+            min_periods=max(3, INFLATION_MOMENTUM_WINDOW // 2),
         ).mean()
 
         df["inflation_momentum"] = df["cpi_yoy_smooth"] - df["cpi_yoy_trend"]
@@ -389,15 +390,11 @@ def compute_inflation_score(df: pd.DataFrame) -> pd.DataFrame:
             CPI_BREAK_DATE,
         )
 
+        # Restored old behavior:
+        # no fallback to level-only score when momentum is missing.
         df["inflation_score_cpi_core"] = (
             0.7 * df["inflation_level_z"]
             + 0.3 * df["inflation_momentum_z"]
-        )
-
-        # If momentum is unavailable, use the level score alone.
-        # This is what prevents "No regime rows generated" right after CPI breaks.
-        df["inflation_score_cpi_core"] = df["inflation_score_cpi_core"].fillna(
-            df["inflation_level_z"],
         )
 
         df["inflation_score"] = df["inflation_score_cpi_core"]
@@ -405,7 +402,8 @@ def compute_inflation_score(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["cpi_level_actual"] = pd.NA
 
-    # Optional WPI add-on
+    # Optional WPI add-on.
+    # This remains unchanged and still uses 3-month smoothing with min_periods=2.
     if "wpi_yoy_change" in df.columns:
         df["wpi_yoy_smooth"] = df["wpi_yoy_change"].rolling(
             window=3,
@@ -503,6 +501,10 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
+# -------------------------
+# Regime classification
+# -------------------------
 
 def classify_regime(row: pd.Series):
     g = row.get("growth_score_smoothed", row.get("growth_score"))
@@ -604,6 +606,10 @@ def classify_regime(row: pd.Series):
         "Signals are mixed and do not point to a strong regime tilt",
     )
 
+
+# -------------------------
+# Build and upsert rows
+# -------------------------
 
 def build_rows(df: pd.DataFrame):
     df = df.reset_index().rename(columns={"index": "as_of_date"})
@@ -709,11 +715,23 @@ def upsert_rows(rows):
     print(result)
 
 
+# -------------------------
+# Main
+# -------------------------
+
 def main():
+    print("REGIME_VERSION =", REGIME_VERSION)
     print("CPI_BREAK_DATE =", CPI_BREAK_DATE)
     print("WPI_BREAK_DATE =", WPI_BREAK_DATE)
     print("LATEST_ALLOWED_DATE =", LATEST_ALLOWED_DATE)
     print("EARLY_MIN_PERIODS =", EARLY_MIN_PERIODS)
+    print("CPI smoothing window = 6 months")
+    print("CPI smoothing min_periods = 3")
+    print("Inflation momentum window =", INFLATION_MOMENTUM_WINDOW)
+    print(
+        "Inflation momentum min_periods =",
+        max(3, INFLATION_MOMENTUM_WINDOW // 2),
+    )
 
     df = load_macro_features()
     df = compute_scores(df)
@@ -739,7 +757,10 @@ def main():
             "real_policy_rate_smooth",
             "real_policy_rate_z",
             "cpi_headline_index_yoy_change",
+            "cpi_yoy_smooth",
+            "cpi_yoy_trend",
             "wpi_yoy_change",
+            "wpi_yoy_smooth",
         ]
         if col in df.columns
     ]
